@@ -1,5 +1,5 @@
 #libraries
-from telethon import TelegramClient,Button,events
+from telethon import TelegramClient,events
 from APIrequirements import API_ID,API_hash
 from telethon.tl.custom.message import Message
 from telethon.tl.functions.channels import JoinChannelRequest
