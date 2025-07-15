@@ -24,7 +24,7 @@ def save_data(data):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 # set-up client
-client = TelegramClient(session="session/.session",
+client = TelegramClient(session=".session",
                 api_hash=API_hash,api_id=API_ID)
 # manage users
 user_data = load_data() # { user_id: { "gap_list": [], "target_list": [] } }
