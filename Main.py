@@ -1,5 +1,6 @@
 import asyncio
 import signal
+import socks
 import sys
 from datetime import datetime
 
@@ -9,8 +10,6 @@ from config import API_ID, API_HASH, SESSION_PATH, DEBUG, validate_config
 from db import init_db, get_all_active_targets, save_tracked_message
 from handlers import CommandHandlers
 from filters import should_forward, get_media_type
-
-import socks
 
 
 class YahyaBot:
@@ -26,9 +25,6 @@ class YahyaBot:
 
             validate_config()
             init_db()
-
-            # ✅ دقیقا مثل requests:
-            # پروکسی محلی HTTP برای همه درخواست‌ها (HTTP + HTTPS)
             proxy = (socks.HTTP, '127.0.0.1', 10808)
 
             self.client = TelegramClient(SESSION_PATH, API_ID, API_HASH, proxy=proxy)
@@ -85,10 +81,8 @@ class YahyaBot:
             if not event.is_group and not event.is_channel:
                 return
 
-            # فقط فرستنده پیام → مهمه که تارگت باشه
             real_sender_id = getattr(event.message.from_id, "user_id", None)
 
-            # اگر پیام فوروارد باشه → باز فرستنده اصلی رو چک کن
             if event.message.forward:
                 if hasattr(event.message.forward, 'from_id'):
                     real_sender_id = getattr(event.message.forward.from_id, "user_id", None)
@@ -167,7 +161,6 @@ class YahyaBot:
             # توضیح
             await self.client.send_message(user_entity, forward_header.strip())
 
-            # 1️⃣ اگر ریپلای بود → پیام اصلی رو فوروارد کن
             if reply_msg:
                 forwarded_original = await self.client.forward_messages(
                     user_entity,
@@ -175,7 +168,6 @@ class YahyaBot:
                     silent=True
                 )
 
-                # 2️⃣ پیام تارگت رو به‌صورت متن و ریپلای به پیام اصلی بفرست
                 await self.client.send_message(
                     user_entity,
                     message_text,
@@ -183,7 +175,6 @@ class YahyaBot:
                 )
 
             else:
-                # اگر ریپلای نبود → عادی فوروارد کن
                 await self.client.forward_messages(
                     user_entity,
                     event.message,
