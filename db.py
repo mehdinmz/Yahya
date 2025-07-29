@@ -17,7 +17,6 @@ class User(Base):
     
     # Relationships
     targets = relationship("Target", back_populates="user", cascade="all, delete-orphan")
-    filters = relationship("Filter", back_populates="user", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<User(telegram_id={self.telegram_id}, username='{self.username}')>"
@@ -35,28 +34,17 @@ class Target(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
     
+    # Individual filters for each target
+    keywords = Column(Text, nullable=True)  # Comma-separated keywords
+    language = Column(String(5), nullable=True)  # Language code (e.g., 'en', 'fa')
+    media_types = Column(String(100), nullable=True)  # Comma-separated media types
+    
     # Relationships
     user = relationship("User", back_populates="targets")
     messages = relationship("TrackedMessage", back_populates="target", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<Target(target_username='{self.target_username}', group_name='{self.group_name}')>"
-
-class Filter(Base):
-    __tablename__ = 'filters'
-    
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    keywords = Column(Text, nullable=True)  # Comma-separated keywords
-    language = Column(String(5), nullable=True)  # Language code (e.g., 'en', 'fa')
-    media_types = Column(String(100), nullable=True)  # Comma-separated media types
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Relationships
-    user = relationship("User", back_populates="filters")
-    
-    def __repr__(self):
-        return f"<Filter(user_id={self.user_id}, keywords='{self.keywords}', language='{self.language}')>"
 
 class TrackedMessage(Base):
     __tablename__ = 'tracked_messages'
@@ -182,6 +170,19 @@ def get_user_targets(user_id):
     finally:
         db.close()
 
+def get_target_by_username(user_id, target_username):
+    """Get a specific target by username for a user"""
+    db = get_db()
+    try:
+        target = db.query(Target).filter(
+            Target.user_id == user_id,
+            Target.target_username == target_username,
+            Target.is_active == True
+        ).first()
+        return target
+    finally:
+        db.close()
+
 def remove_target(user_id, target_username):
     """Remove a target by setting is_active to False"""
     db = get_db()
@@ -227,7 +228,6 @@ def save_tracked_message(target_id, message_id, message_text, media_type, origin
         )
         db.add(tracked_message)
         db.commit()
-        print(f"✅ Message saved: ID={message_id}, Target={target_id}")
         return tracked_message
     except Exception as e:
         db.rollback()
@@ -236,37 +236,67 @@ def save_tracked_message(target_id, message_id, message_text, media_type, origin
     finally:
         db.close()
 
-def set_user_filter(user_id, keywords=None, language=None, media_types=None):
-    """Set or update user filters"""
+def set_target_filter(user_id, target_username, keywords=None, language=None, media_types=None):
+    """Set or update filters for a specific target"""
     db = get_db()
     try:
-        # Remove existing filters
-        db.query(Filter).filter(Filter.user_id == user_id).delete()
+        target = db.query(Target).filter(
+            Target.user_id == user_id,
+            Target.target_username == target_username,
+            Target.is_active == True
+        ).first()
         
-        # Add new filter
-        filter_obj = Filter(
-            user_id=user_id,
-            keywords=keywords,
-            language=language,
-            media_types=media_types
-        )
-        db.add(filter_obj)
+        if not target:
+            return None
+        
+        # Update target filters
+        target.keywords = keywords
+        target.language = language
+        target.media_types = media_types
+        
         db.commit()
-        print(f"✅ Filter set for user {user_id}")
-        return filter_obj
+        print(f"✅ Filter set for target {target_username}")
+        return target
     except Exception as e:
         db.rollback()
-        print(f"❌ Error setting filter: {e}")
+        print(f"❌ Error setting target filter: {e}")
         raise
     finally:
         db.close()
 
-def get_user_filter(user_id):
-    """Get user filter"""
+def get_target_filter(target_id):
+    """Get filter for a specific target"""
     db = get_db()
     try:
-        filter_obj = db.query(Filter).filter(Filter.user_id == user_id).first()
-        return filter_obj
+        target = db.query(Target).filter(Target.id == target_id).first()
+        return target
+    finally:
+        db.close()
+
+def clear_target_filter(user_id, target_username):
+    """Clear all filters for a specific target"""
+    db = get_db()
+    try:
+        target = db.query(Target).filter(
+            Target.user_id == user_id,
+            Target.target_username == target_username,
+            Target.is_active == True
+        ).first()
+        
+        if not target:
+            return False
+        
+        target.keywords = None
+        target.language = None
+        target.media_types = None
+        
+        db.commit()
+        print(f"✅ Filters cleared for target {target_username}")
+        return True
+    except Exception as e:
+        db.rollback()
+        print(f"❌ Error clearing target filter: {e}")
+        raise
     finally:
         db.close()
 

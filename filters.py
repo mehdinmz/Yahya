@@ -1,7 +1,6 @@
 from langdetect import detect, DetectorFactory
 from langdetect.lang_detect_exception import LangDetectException
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
-from db import get_user_filter
 
 # Set seed for consistent results
 DetectorFactory.seed = 0
@@ -32,8 +31,6 @@ def get_media_type(message):
             return 'image'
         else:
             return 'document'
-    elif isinstance(message.media, MessageMediaVideo):
-        return 'video'
     else:
         return 'media'
 
@@ -76,24 +73,20 @@ def matches_media_type(message, target_media_types):
     message_media_type = get_media_type(message)
     return message_media_type in media_types_list
 
-def should_forward(message, user_id):
+def should_forward(message, target):
     """
-    Determine if a message should be forwarded based on user filters
+    Determine if a message should be forwarded based on target filters
     
     Args:
         message: Telethon message object
-        user_id: Database user ID
+        target: Target object with filters
         
     Returns:
         bool: True if message should be forwarded
     """
     try:
-        # Get user filter
-        user_filter = get_user_filter(user_id)
-        
-        # If no filter exists, allow all messages
-        if not user_filter:
-            print(f"🔄 No filter found for user {user_id}, allowing message")
+        # If no filters are set, allow all messages
+        if not target.keywords and not target.language and not target.media_types:
             return True
         
         # Get message text
@@ -102,44 +95,88 @@ def should_forward(message, user_id):
             message_text = message.message or ""
         
         # Check keywords
-        if user_filter.keywords:
-            if not matches_keywords(message_text, user_filter.keywords):
-                print(f"❌ Message doesn't match keywords: {user_filter.keywords}")
+        if target.keywords:
+            if not matches_keywords(message_text, target.keywords):
                 return False
         
         # Check language
-        if user_filter.language:
-            if not matches_language(message_text, user_filter.language):
-                print(f"❌ Message doesn't match language: {user_filter.language}")
+        if target.language:
+            if not matches_language(message_text, target.language):
                 return False
         
         # Check media type
-        if user_filter.media_types:
-            if not matches_media_type(message, user_filter.media_types):
-                print(f"❌ Message doesn't match media types: {user_filter.media_types}")
+        if target.media_types:
+            if not matches_media_type(message, target.media_types):
                 return False
         
-        print(f"✅ Message passed all filters for user {user_id}")
         return True
         
     except Exception as e:
         print(f"❌ Error in should_forward: {e}")
         return True  # Default to forwarding if error occurs
 
-def get_filter_summary(user_id):
-    """Get a summary of user's current filters"""
+def get_target_filter_summary_safe(user_id, target_username):
+    """
+    Safely get a summary of target's current filters using a fresh database query
+    
+    Args:
+        user_id: User ID
+        target_username: Target username
+        
+    Returns:
+        str: Filter summary
+    """
     try:
-        user_filter = get_user_filter(user_id)
-        if not user_filter:
-            return "No filters set"
+        from db import get_target_by_username
+        
+        # Get fresh target from database
+        target = get_target_by_username(user_id, target_username)
+        if not target:
+            return "Target not found"
         
         summary = []
-        if user_filter.keywords:
-            summary.append(f"Keywords: {user_filter.keywords}")
-        if user_filter.language:
-            summary.append(f"Language: {user_filter.language}")
-        if user_filter.media_types:
-            summary.append(f"Media types: {user_filter.media_types}")
+        if target.keywords:
+            summary.append(f"Keywords: {target.keywords}")
+        if target.language:
+            summary.append(f"Language: {target.language}")
+        if target.media_types:
+            summary.append(f"Media types: {target.media_types}")
+        
+        return "\n".join(summary) if summary else "No filters set"
+    
+    except Exception as e:
+        print(f"❌ Error getting filter summary: {e}")
+        return "Error retrieving filters"
+
+def get_target_filter_summary(target):
+    """
+    DEPRECATED: Use get_target_filter_summary_safe instead
+    Get a summary of target's current filters
+    """
+    try:
+        if not target:
+            return "Target not found"
+        
+        # Try to access attributes safely
+        summary = []
+        
+        try:
+            if hasattr(target, 'keywords') and target.keywords:
+                summary.append(f"Keywords: {target.keywords}")
+        except:
+            pass
+            
+        try:
+            if hasattr(target, 'language') and target.language:
+                summary.append(f"Language: {target.language}")
+        except:
+            pass
+            
+        try:
+            if hasattr(target, 'media_types') and target.media_types:
+                summary.append(f"Media types: {target.media_types}")
+        except:
+            pass
         
         return "\n".join(summary) if summary else "No filters set"
     

@@ -1,13 +1,12 @@
 import asyncio
 import signal
-import socks
 import sys
 from datetime import datetime
 
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
-from config import API_ID, API_HASH, SESSION_PATH, DEBUG, validate_config
-from db import init_db, get_all_active_targets, save_tracked_message
+from config import API_ID, API_HASH, SESSION_PATH, validate_config
+from db import init_db, get_all_active_targets, save_tracked_message, get_target_filter
 from handlers import CommandHandlers
 from filters import should_forward, get_media_type
 
@@ -25,12 +24,9 @@ class YahyaBot:
 
             validate_config()
             init_db()
-            proxy = (socks.HTTP, '127.0.0.1', 10808)
 
-            self.client = TelegramClient(SESSION_PATH, API_ID, API_HASH, proxy=proxy)
-
+            self.client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
             self.handlers = CommandHandlers(self.client)
-
             self.client.add_event_handler(self.handle_new_message, events.NewMessage())
 
             print("✅ Bot initialized successfully")
@@ -78,29 +74,30 @@ class YahyaBot:
     async def handle_new_message(self, event):
         """Handle new messages and check if they should be forwarded"""
         try:
+            # Only process group and channel messages
             if not event.is_group and not event.is_channel:
                 return
 
+            # Get real sender ID (handles forwarded messages)
             real_sender_id = getattr(event.message.from_id, "user_id", None)
 
+            # Handle forwarded messages
             if event.message.forward:
                 if hasattr(event.message.forward, 'from_id'):
                     real_sender_id = getattr(event.message.forward.from_id, "user_id", None)
                 elif hasattr(event.message.forward, 'original_sender_id'):
                     real_sender_id = event.message.forward.original_sender_id
 
+            # Skip if no sender ID found
             if real_sender_id is None:
-                if DEBUG:
-                    print("[DEBUG] No sender ID → skip")
                 return
 
-            if DEBUG:
-                print(f"[DEBUG] Incoming msg → sender_id: {real_sender_id}, chat_id: {event.chat_id}")
-
+            # Get all active targets
             targets = get_all_active_targets()
             if not targets:
                 return
 
+            # Find matching targets
             matched_targets = [
                 target
                 for target in targets
@@ -108,22 +105,13 @@ class YahyaBot:
                 and target.group_id == event.chat_id
             ]
 
-            if DEBUG:
-                print(f"[DEBUG] Found {len(matched_targets)} matched targets")
-
             if not matched_targets:
-                if DEBUG:
-                    print("[DEBUG] No matched targets for this sender/group")
                 return
 
+            # Process each matched target
             for target in matched_targets:
-                if should_forward(event.message, target.user_id):
+                if should_forward(event.message, target):
                     await self.forward_message(event, target)
-                    if DEBUG:
-                        print(f"[DEBUG] ✅ Forwarded → @{target.target_username}")
-                else:
-                    if DEBUG:
-                        print(f"[DEBUG] ❌ Filtered → @{target.target_username}")
 
         except Exception as e:
             print(f"❌ Error in handle_new_message: {e}")
@@ -135,6 +123,7 @@ class YahyaBot:
             media_type = get_media_type(event.message)
             original_date = event.message.date
 
+            # Handle reply messages
             reply_info = ""
             reply_msg = None
 
@@ -145,6 +134,7 @@ class YahyaBot:
                     reply_sender = f"User ID: {reply_sender_id}" if reply_sender_id else "Unknown"
                     reply_info = f"\n📌 This message is a reply to: {reply_sender}"
 
+            # Create forward header
             forward_header = f"""
 🎯 **New Message from Target**
 
@@ -156,31 +146,36 @@ class YahyaBot:
 {'─' * 30}
             """
 
+            # Get user entity and send message
             user_entity = await self.client.get_entity(target.user.telegram_id)
 
-            # توضیح
+            # Send header
             await self.client.send_message(user_entity, forward_header.strip())
 
+            # Handle reply context
             if reply_msg:
+                # Forward the original message being replied to
                 forwarded_original = await self.client.forward_messages(
                     user_entity,
                     reply_msg,
                     silent=True
                 )
 
+                # Send the reply message with context
                 await self.client.send_message(
                     user_entity,
                     message_text,
                     reply_to=forwarded_original.id
                 )
-
             else:
+                # Forward the message normally
                 await self.client.forward_messages(
                     user_entity,
                     event.message,
                     silent=True
                 )
 
+            # Save message to database
             save_tracked_message(
                 target_id=target.id,
                 message_id=event.message.id,
@@ -189,13 +184,21 @@ class YahyaBot:
                 original_date=original_date
             )
 
-            if DEBUG:
-                print(f"✅ Saved to DB → @{target.target_username}")
-
         except Exception as e:
             print(f"❌ Error forwarding message: {e}")
 
+    async def stop(self):
+        """Stop the bot gracefully"""
+        try:
+            if self.client and self.client.is_connected():
+                await self.client.disconnect()
+            self.running = False
+            print("✅ Bot stopped gracefully")
+        except Exception as e:
+            print(f"❌ Error stopping bot: {e}")
 
+
+# Global bot instance
 bot = YahyaBot()
 
 
@@ -205,7 +208,7 @@ async def main():
         await bot.initialize()
         await bot.start()
 
-    except Keyboard:
+    except KeyboardInterrupt:
         print("\n⏹️ Received interrupt signal")
     except Exception as e:
         print(f"❌ Fatal error: {e}")
@@ -221,21 +224,23 @@ def signal_handler(signum, frame):
 
 
 if __name__ == "__main__":
+    # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Display startup banner
     banner = """
     ╔══════════════════════════════════════════════════════════════╗
     ║                                                              ║
-    ║    ██    ██  █████  ██   ██ ██    ██  █████                  ║
-    ║     ██  ██  ██   ██ ██   ██  ██  ██  ██   ██                 ║
-    ║      ████   ███████ ███████   ████   ███████                 ║
-    ║       ██    ██   ██ ██   ██    ██    ██   ██                 ║
-    ║       ██    ██   ██ ██   ██    ██    ██   ██                 ║
+    ║           ██    ██  █████  ██   ██ ██    ██  █████           ║
+    ║            ██  ██  ██   ██ ██   ██  ██  ██  ██   ██          ║
+    ║             ████   ███████ ███████   ████   ███████          ║
+    ║              ██    ██   ██ ██   ██    ██    ██   ██          ║
+    ║              ██    ██   ██ ██   ██    ██    ██   ██          ║
     ║                                                              ║
-    ║           🎯 Telegram UserBot for Target Monitoring         ║
+    ║           🎯 Telegram UserBot for Target Monitoring          ║
     ║                                                              ║
-    ║                    Production-Grade v2.0                     ║
+    ║                    Production-Grade v2.1                     ║
     ║                                                              ║
     ╚══════════════════════════════════════════════════════════════╝
     """

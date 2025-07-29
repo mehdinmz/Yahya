@@ -11,10 +11,10 @@ from telethon.tl.types import User as TelegramUser
 
 from db import (
     create_user, get_user, add_target, get_user_targets,
-    remove_target, set_user_filter, get_user_filter, get_user_messages
+    remove_target, set_target_filter, get_target_by_username, 
+    clear_target_filter, get_user_messages
 )
-from filters import validate_filter_input, get_filter_summary
-from config import DEBUG
+from filters import validate_filter_input, get_target_filter_summary_safe
 
 
 class CommandHandlers:
@@ -30,6 +30,7 @@ class CommandHandlers:
         self.client.add_event_handler(self.handle_removetarget, events.NewMessage(pattern=r'^/removetarget'))
         self.client.add_event_handler(self.handle_setfilter, events.NewMessage(pattern=r'^/setfilter'))
         self.client.add_event_handler(self.handle_viewfilter, events.NewMessage(pattern=r'^/viewfilter'))
+        self.client.add_event_handler(self.handle_clearfilter, events.NewMessage(pattern=r'^/clearfilter'))
         self.client.add_event_handler(self.handle_export, events.NewMessage(pattern=r'^/export'))
         self.client.add_event_handler(self.handle_help, events.NewMessage(pattern=r'^/help'))
 
@@ -54,13 +55,15 @@ Hello {sender.first_name}! Your account has been registered.
 • `/newtarget @username group_link` - Add a new target to monitor
 • `/viewtargets` - View all your active targets
 • `/removetarget @username` - Remove a target
-• `/setfilter` - Set message filters (keywords, language, media types)
-• `/viewfilter` - View current filters
+• `/setfilter @username` - Set filters for a specific target
+• `/viewfilter @username` - View filters for a target
+• `/clearfilter @username` - Clear all filters for a target
 • `/export` - Export all tracked messages as CSV
 • `/help` - Show this help message
 
 **Example:**
 `/newtarget @johndoe https://t.me/+AbCdEfGhIjKlMnOp`
+`/setfilter @johndoe keywords:bitcoin,crypto language:en`
 
 Happy monitoring! 🎯
 """
@@ -92,20 +95,18 @@ Happy monitoring! 🎯
             target_username = args[1].replace('@', '')
             group_link = args[2]
 
-            # ✅ Join group first and get entity
+            # Join group first and get entity
             group_entity = await self.join_group(group_link)
             if not group_entity:
                 await event.reply("❌ Failed to join the group. Please check the link and try again.")
                 return
 
-            # ✅ Fix group_id to match real chat_id format (-100...)
+            # Fix group_id to match real chat_id format (-100...)
             real_group_id = group_entity.id
             if not str(real_group_id).startswith("-100"):
                 real_group_id = int(f"-100{real_group_id}")
 
-            print(f"[DEBUG] Final group ID saved: {real_group_id}")
-
-            # ✅ Get target user entity
+            # Get target user entity
             try:
                 target_entity = await self.client.get_entity(target_username)
                 if not isinstance(target_entity, TelegramUser):
@@ -115,7 +116,7 @@ Happy monitoring! 🎯
                 await event.reply(f"❌ Could not find user @{target_username}. Make sure the username is correct.")
                 return
 
-            # ✅ Add target to DB with corrected group_id
+            # Add target to DB with corrected group_id
             target = add_target(
                 user_id=user.id,
                 target_telegram_id=target_entity.id,
@@ -133,6 +134,8 @@ Happy monitoring! 🎯
 **Group ID:** {real_group_id}
 
 I will now monitor messages from @{target_username} in this group and forward them to you.
+
+Use `/setfilter @{target_username}` to set specific filters for this target.
 """
             await event.reply(success_message)
 
@@ -192,8 +195,10 @@ I will now monitor messages from @{target_username} in this group and forward th
             message = "🎯 **Your Active Targets:**\n\n"
 
             for i, target in enumerate(targets, 1):
+                filter_status = "No filters" if not any([target.keywords, target.language, target.media_types]) else "Filtered"
                 message += f"**{i}.** @{target.target_username}\n"
                 message += f"   📍 Group: {target.group_name}\n"
+                message += f"   🔧 Status: {filter_status}\n"
                 message += f"   📅 Added: {target.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
 
             await event.reply(message)
@@ -244,9 +249,9 @@ I will now monitor messages from @{target_username} in this group and forward th
 
             if not text:
                 help_message = """
-🔧 **Set Message Filters**
+🔧 **Set Target Filters**
 
-Usage: `/setfilter keywords:word1,word2 language:en media:text,photo`
+Usage: `/setfilter @username keywords:word1,word2 language:en media:text,photo`
 
 **Parameters:**
 • `keywords:` - Comma-separated keywords to match
@@ -254,43 +259,61 @@ Usage: `/setfilter keywords:word1,word2 language:en media:text,photo`
 • `media:` - Media types (text, photo, video, audio, image, document, media)
 
 **Examples:**
-• `/setfilter keywords:bitcoin,crypto language:en`
-• `/setfilter media:photo,video`
-• `/setfilter keywords:important language:fa media:text`
+• `/setfilter @johndoe keywords:bitcoin,crypto language:en`
+• `/setfilter @alice media:photo,video`
+• `/setfilter @bob keywords:important language:fa media:text`
 
-**To remove all filters:** `/setfilter clear`
+**To view filters:** `/viewfilter @username`
+**To clear filters:** `/clearfilter @username`
 """
                 await event.reply(help_message)
                 return
 
-            if text.lower() == 'clear':
-                set_user_filter(user.id)
-                await event.reply("✅ All filters have been cleared.")
+            # Parse username and filter parameters
+            parts = text.split(' ', 1)
+            if len(parts) < 2:
+                await event.reply("❌ Usage: `/setfilter @username [filter_parameters]`")
+                return
+
+            target_username = parts[0].replace('@', '')
+            filter_text = parts[1]
+
+            # Check if target exists
+            target = get_target_by_username(user.id, target_username)
+            if not target:
+                await event.reply(f"❌ Target @{target_username} not found in your active targets.")
                 return
 
             keywords, language, media_types = None, None, None
 
-            keyword_match = re.search(r'keywords?:([^,\s]+(?:,[^,\s]+)*)', text, re.IGNORECASE)
+            # Parse filter parameters
+            keyword_match = re.search(r'keywords?:([^,\s]+(?:,[^,\s]+)*)', filter_text, re.IGNORECASE)
             if keyword_match:
                 keywords = keyword_match.group(1)
 
-            language_match = re.search(r'language?:([a-z]{2})', text, re.IGNORECASE)
+            language_match = re.search(r'language?:([a-z]{2})', filter_text, re.IGNORECASE)
             if language_match:
                 language = language_match.group(1).lower()
 
-            media_match = re.search(r'media:([^,\s]+(?:,[^,\s]+)*)', text, re.IGNORECASE)
+            media_match = re.search(r'media:([^,\s]+(?:,[^,\s]+)*)', filter_text, re.IGNORECASE)
             if media_match:
                 media_types = media_match.group(1)
 
+            # Validate filter input
             errors = validate_filter_input(keywords, language, media_types)
             if errors:
                 await event.reply("❌ **Filter Validation Errors:**\n" + "\n".join(errors))
                 return
 
-            set_user_filter(user.id, keywords, language, media_types)
+            # Set target filter
+            updated_target = set_target_filter(user.id, target_username, keywords, language, media_types)
+            if not updated_target:
+                await event.reply(f"❌ Failed to set filter for @{target_username}.")
+                return
 
-            filter_summary = get_filter_summary(user.id)
-            await event.reply(f"✅ **Filters Updated Successfully!**\n\n{filter_summary}")
+            # Use the safe method to get filter summary
+            filter_summary = get_target_filter_summary_safe(user.id, target_username)
+            await event.reply(f"✅ **Filters Updated for @{target_username}!**\n\n{filter_summary}")
 
         except Exception as e:
             print(f"❌ Error in handle_setfilter: {e}")
@@ -306,12 +329,60 @@ Usage: `/setfilter keywords:word1,word2 language:en media:text,photo`
                 await event.reply("❌ Please run /start first to register your account.")
                 return
 
-            filter_summary = get_filter_summary(user.id)
-            await event.reply(f"🔧 **Current Filters:**\n\n{filter_summary}")
+            args = event.message.text.split(' ', 1)
+            if len(args) < 2:
+                await event.reply("❌ Usage: `/viewfilter @username`\nExample: `/viewfilter @johndoe`")
+                return
+
+            target_username = args[1].replace('@', '')
+
+            # Check if target exists
+            target = get_target_by_username(user.id, target_username)
+            if not target:
+                await event.reply(f"❌ Target @{target_username} not found in your active targets.")
+                return
+
+            # Use the safe method to get filter summary
+            filter_summary = get_target_filter_summary_safe(user.id, target_username)
+            await event.reply(f"🔧 **Current Filters for @{target_username}:**\n\n{filter_summary}")
 
         except Exception as e:
             print(f"❌ Error in handle_viewfilter: {e}")
-            await event.reply("❌ An error occurred while retrieving your filters.")
+            await event.reply("❌ An error occurred while retrieving the filter.")
+
+    async def handle_clearfilter(self, event):
+        """Handle /clearfilter command"""
+        try:
+            sender = await event.get_sender()
+            user = get_user(sender.id)
+
+            if not user:
+                await event.reply("❌ Please run /start first to register your account.")
+                return
+
+            args = event.message.text.split(' ', 1)
+            if len(args) < 2:
+                await event.reply("❌ Usage: `/clearfilter @username`\nExample: `/clearfilter @johndoe`")
+                return
+
+            target_username = args[1].replace('@', '')
+
+            # Check if target exists
+            target = get_target_by_username(user.id, target_username)
+            if not target:
+                await event.reply(f"❌ Target @{target_username} not found in your active targets.")
+                return
+
+            success = clear_target_filter(user.id, target_username)
+
+            if success:
+                await event.reply(f"✅ All filters have been cleared for @{target_username}.")
+            else:
+                await event.reply(f"❌ Failed to clear filters for @{target_username}.")
+
+        except Exception as e:
+            print(f"❌ Error in handle_clearfilter: {e}")
+            await event.reply("❌ An error occurred while clearing the filter.")
 
     async def handle_export(self, event):
         """Handle /export command"""
@@ -377,9 +448,10 @@ Usage: `/setfilter keywords:word1,word2 language:en media:text,photo`
 • `/viewtargets` - View all your active targets
 • `/removetarget @username` - Remove a target
 
-**🔧 Filter Management:**
-• `/setfilter` - Set message filters (keywords, language, media types)
-• `/viewfilter` - View current active filters
+**🔧 Filter Management (Per Target):**
+• `/setfilter @username [parameters]` - Set filters for a specific target
+• `/viewfilter @username` - View filters for a target
+• `/clearfilter @username` - Clear all filters for a target
 
 **📊 Data Management:**
 • `/export` - Export all tracked messages as CSV file
@@ -387,6 +459,11 @@ Usage: `/setfilter keywords:word1,word2 language:en media:text,photo`
 **ℹ️ Information:**
 • `/help` - Show this help message
 • `/start` - Register your account and show welcome message
+
+**Filter Examples:**
+• `/setfilter @johndoe keywords:bitcoin,crypto language:en`
+• `/setfilter @alice media:photo,video`
+• `/setfilter @bob keywords:important language:fa media:text`
 """
             await event.reply(help_message)
         except Exception as e:
